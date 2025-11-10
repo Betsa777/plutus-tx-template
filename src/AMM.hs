@@ -152,7 +152,7 @@ finalizeAdding adaAmount tokenAmount tokensForLp poolParams ctx =
             List.any
               ( \inp ->
                   List.any
-                    (\(cs, _, am) -> (cs P.== adaSymbol) P.&& (am P.== adaAmount))
+                    (\(cs, _, am) -> (cs P.== adaSymbol) P.&& (am P.>= adaAmount))
                     (flattenValue $ txOutValue $ txInInfoResolved inp)
               )
               inputs
@@ -161,7 +161,7 @@ finalizeAdding adaAmount tokenAmount tokensForLp poolParams ctx =
             List.any
               ( \inp ->
                   List.any
-                    (\(cs, _, am) -> (cs P.== tokSymb) P.&& (am P.== tokenAmount))
+                    (\(cs, _, am) -> (cs P.== tokSymb) P.&& (am P.>= tokenAmount))
                     (flattenValue $ txOutValue $ txInInfoResolved inp)
               )
               inputs
