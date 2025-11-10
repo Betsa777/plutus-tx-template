@@ -1,6 +1,6 @@
 module Main (main) where
 
-import AMM (AMMRedeemer (..), ammValidator)
+import AMM (AMMRedeemer (..), PoolParams(..),ammValidator)
 import qualified Data.ByteString.Char8  as C
 import PlutusLedgerApi.V1 (TxId (..))
 import PlutusLedgerApi.V1.Interval (interval)
@@ -41,27 +41,16 @@ adaAmount = 100
 tokenAmount :: Integer
 tokenAmount = 200
 
-adaR :: Integer
-adaR = 200
-
-tokR :: Integer
-tokR = 0
-
-lpTokNumb :: Integer
-lpTokNumb = 10
-
-lpPKH :: PubKeyHash
-lpPKH = PubKeyHash $ BuiltinByteString (C.pack "lp")
-
-lpCurrSymb :: CurrencySymbol
-lpCurrSymb = CurrencySymbol $ BuiltinByteString (C.pack "LP")
-
-lpTokName :: TokenName
-lpTokName = TokenName $ BuiltinByteString (C.pack "LPToken")
-
-tokCS :: CurrencySymbol
-tokCS = CurrencySymbol $ BuiltinByteString (C.pack "WIMS")
-
+poolParams:: PoolParams
+poolParams = PoolParams{
+    adaR = 200,
+    tokR = 0,
+    tokSymbol = CurrencySymbol $ BuiltinByteString (C.pack "WIMS"),
+    lpTokNumb = 10,
+    lpPKH = PubKeyHash $ BuiltinByteString (C.pack "lp"),
+    lpCurrSymb = CurrencySymbol $ BuiltinByteString (C.pack "LP"),
+    lpTokName = TokenName $ BuiltinByteString (C.pack "LPToken")
+}
 tokName :: TokenName
 tokName = TokenName $ BuiltinByteString (C.pack "WimsToken")
 
@@ -71,13 +60,13 @@ scriptAddress = Address (ScriptCredential (ScriptHash (BuiltinByteString (C.pack
 lpAddress = Address (PubKeyCredential (PubKeyHash (BuiltinByteString (C.pack "lp")))) Nothing
 
 previousDatumHash =
-  let adaHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 adaR)
-      tokHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 tokR)
+  let adaHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 (adaR poolParams))
+      tokHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 (tokR poolParams))
     in Builtins.sha2_256 $ Builtins.appendByteString adaHash tokHash
 
 newDatumHash =
- let adaHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 (adaAmount + adaR))
-     tokHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 (tokenAmount + tokR))
+ let adaHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 (adaAmount + (adaR poolParams)))
+     tokHash = Builtins.sha2_256 (Builtins.integerToByteString Builtins.BigEndian 0 (tokenAmount + (tokR poolParams)))
   in Builtins.sha2_256 $ Builtins.appendByteString adaHash tokHash
 
 scriptInput:: TxInInfo
@@ -101,7 +90,7 @@ lpInput = TxInInfo{
       TxOut
         { txOutAddress = lpAddress,
           txOutValue = singleton adaSymbol adaToken adaAmount
-            <> singleton tokCS tokName tokenAmount,
+            <> singleton (tokSymbol poolParams) tokName tokenAmount,
           txOutDatum = NoOutputDatum,
           txOutReferenceScript = Nothing
         }
@@ -111,8 +100,8 @@ scriptOutput =
   TxOut
     { txOutAddress = scriptAddress,
       txOutValue =
-        singleton adaSymbol adaToken (adaAmount + adaR)
-          <> singleton tokCS tokName (tokenAmount + tokR) ,
+        singleton adaSymbol adaToken (adaAmount + (adaR poolParams))
+          <> singleton (tokSymbol poolParams) tokName (tokenAmount + (tokR poolParams)) ,
       txOutDatum = OutputDatumHash $ DatumHash newDatumHash,
       txOutReferenceScript = Nothing
     }
@@ -123,7 +112,7 @@ value = singleton adaSymbol adaToken adaAmount
 lpOutput =
   TxOut
     { txOutAddress = lpAddress,
-      txOutValue = singleton lpCurrSymb lpTokName (adaR + adaAmount),
+      txOutValue = singleton (lpCurrSymb poolParams) (lpTokName poolParams) ((adaR poolParams) + adaAmount),
       txOutDatum = NoOutputDatum,
       txOutReferenceScript = Nothing
     }
@@ -139,7 +128,7 @@ txInfo =
       txInfoDCert = [],
       txInfoWdrl = Map.empty,
       txInfoValidRange = interval 10 20,
-      txInfoSignatories = [lpPKH],
+      txInfoSignatories = [lpPKH poolParams],
       txInfoRedeemers = Map.empty,
       txInfoData = Map.empty,
       txInfoId = TxId $ BuiltinByteString (C.pack "")
@@ -153,12 +142,12 @@ scriptContext =
     }
 
 redeemer :: AMMRedeemer
-redeemer = AddLiquidity adaAmount tokenAmount adaR tokR lpTokNumb lpPKH lpCurrSymb lpTokName
+redeemer = AddLiquidity adaAmount tokenAmount poolParams
 
 main :: IO ()
 main = hspec $ do
   describe "AMMValidator" $ do
-    it "must give true" $ do
+    it "addliquidty test if token reserve equals 0" $ do
       let [o] = getContinuingOutputs scriptContext
       putStrLn $ show $ txOutValue o
       ammValidator redeemer scriptContext
