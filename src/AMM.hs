@@ -75,7 +75,7 @@ PlutusTx.makeIsDataSchemaIndexed ''PoolParams [('PoolParams,0)]
 -- 3. Remove the liquidity
 data AMMRedeemer
   = AddLiquidity Amount Amount PoolParams
-  | Swap Amount CurrencySymbol LPPKH
+  | Swap Amount Amount AdaReserve TokenReserve LPTokenCurrencySymbol
   | RemoveLiquidity Amount LPPKH
   deriving stock (Generic)
   deriving anyclass (HasBlueprintDefinition)
@@ -93,7 +93,8 @@ ammValidator r ctx =
   case r of
     AddLiquidity adaAmount tokenAmount poolParams ->
       P.traceIfFalse "AddLiquidty fails" (addLiquidity adaAmount tokenAmount poolParams ctx)
-    -- Swap amount tokSymbol lpPKH ->
+    Swap amount minAmount adaR tokR tokSymbol ->
+      P.traceIfFalse "Swap fails" (swap amount minAmount adaR tokR tokSymbol ctx)
     --   P.traceIfFalse "Swap fails" (swap amount tokSymbol lpPKH ctx)
 -- Swap tA tB amount owner ->
 --   P.traceIfFalse "Swap fails" (swap tA tB amount owner ctx)
@@ -208,8 +209,125 @@ getHash adaR tokR =
 
 --swap part
 {-# INLINEABLE swap #-}
-swap:: Amount -> LPTokenCurrencySymbol -> LPPKH -> ScriptContext -> Bool
-swap amount tokSymbol lpPKH ctx = True
+--Take 1% on each swap
+-- Before swap we must verify off-chain if there is enough of tokens for the
+-- swap
+swap:: Amount -> Amount -> AdaReserve -> TokenReserve -> TokenSymbol -> ScriptContext -> Bool
+-- amount -> amount to swap
+-- minAmount -> minimum token expected
+-- tokSymbol == adaSymbol -> that mean the user want to swap ada to token
+swap amount minAmount adaR tokR tokSymbol ctx =
+    List.and conditions
+  -- swaps ada with tokens
+    where
+     conditions:: [Bool]
+     conditions = [
+                     userInput amount tokSymbol ctx,
+                     userOutput amount minAmount adaR tokR tokSymbol ctx,
+                     scriptOutput amount adaR tokR tokSymbol ctx
+                    ]
+    --tokSymbol can be adaSymbol or the TokenSymbol. It depends on what user wants to swap.
+     userInput:: Amount -> TokenSymbol -> ScriptContext -> Bool
+     userInput amount tokSymbol ctx =
+      let userPKH = List.head $ txInfoSignatories (scriptContextTxInfo ctx)
+          inputs = txInfoInputs $ scriptContextTxInfo ctx
+          --find the good input at the user pkh with the good amount
+       in List.any(\inp ->
+              case addressCredential (txOutAddress $ txInInfoResolved inp) of
+                       PubKeyCredential pkh -> pkh == userPKH
+                                               P.&&
+
+                                               List.any (\(cs, _, am) -> (cs P.== tokSymbol) P.&& (am P.>= amount))
+                                                  (flattenValue $ txOutValue $ txInInfoResolved inp)
+                       _ -> False
+            ) inputs
+
+     userOutput:: Amount -> Amount -> AdaReserve -> TokenReserve -> TokenSymbol -> ScriptContext -> Bool
+     userOutput amount minAmount adaR tokR tokSymbol ctx =
+          case tokSymbol P.== adaSymbol of
+              True -> let tokensBougth = adaToToken amount adaR tokR
+                          pkh = List.head $ txInfoSignatories (scriptContextTxInfo ctx)
+                       in if tokensBougth < minAmount
+                             then False
+                            -- Verify that user get the good tokens amount
+                            -- in output
+                             else List.any ( \o ->
+                                        List.any
+                                          (\(cs, _, am) -> (cs P./= adaSymbol) P.&& (am P.== tokensBougth))
+                                          (flattenValue $ txOutValue $ o)
+                                          P.&& ( case addressCredential (txOutAddress o) of
+                                                   PubKeyCredential userPKH -> userPKH P.== pkh
+                                                   _ -> False
+                                                )
+                                          )
+                                          (txInfoOutputs (scriptContextTxInfo ctx))
+
+              False -> let adaBougth = tokenToAda amount tokR adaR
+                           userPKH = List.head $ txInfoSignatories (scriptContextTxInfo ctx)
+                        in if adaBougth < minAmount
+                             then False
+                            -- Verify that user get the good tokens amount
+                            -- in output
+                             else List.any ( \o ->
+                                    valueOf (txOutValue o) adaSymbol adaToken P.== adaBougth
+                                          P.&& ( case addressCredential (txOutAddress o) of
+                                                   PubKeyCredential pkh -> pkh == userPKH
+                                                   _ -> False
+                                                )
+                                          )
+                                          (txInfoOutputs (scriptContextTxInfo ctx))
+
+     scriptOutput:: Amount -> AdaReserve -> TokenReserve -> TokenSymbol -> ScriptContext -> Bool
+     scriptOutput amount adaR tokR tokSymbol ctx =
+        case getContinuingOutputs ctx of
+           [o] -> case tokSymbol P.== adaSymbol of
+                      True -> let tokensBougth = adaToToken amount adaR tokR
+                      --update the ada's reserve because it swap ada and get tokens
+                      -- so that token's reserve decrease and ada's reserve increase
+                                  adaReserveUpdate =  valueOf (txOutValue o) adaSymbol adaToken P.== adaR P.+ amount
+                                  tokenReserveUpdate = List.any
+                                                        (\(cs, _, am) -> (cs P./= adaSymbol) P.&& (am P.== tokR P.- tokensBougth))
+                                                        (flattenValue $ txOutValue $ o)
+                                in adaReserveUpdate P.&& tokenReserveUpdate
+                      False -> let adaBougth = tokenToAda amount tokR adaR
+                      --update the token's reserve because it gives tokens and get ada
+                      -- so that token's reserve increase and ada's reserve decrease
+                                   adaReserveUpdate =  valueOf (txOutValue o) adaSymbol adaToken P.== adaR P.- adaBougth
+                                   tokenReserveUpdate = List.any
+                                                        (\(cs, _, am) -> (cs P./= adaSymbol) P.&& (am P.== tokR P.+ amount))
+                                                        (flattenValue $ txOutValue $ o)
+                                in adaReserveUpdate P.&& tokenReserveUpdate
+           _ -> False
+
+
+
+
+
+
+{-# INLINEABLE adaToToken #-}
+adaToToken:: Amount -> AdaReserve -> TokenReserve -> Amount
+adaToToken amount adaR tokR =
+   let tokensBougth = getAmountForSwp amount adaR tokR
+    in tokensBougth
+
+{-# INLINEABLE tokenToAda #-}
+tokenToAda:: Amount -> TokenReserve -> AdaReserve -> Amount
+tokenToAda amount tokR adaR =
+ let adaBougth = getAmountForSwp amount tokR adaR
+  in adaBougth
+
+
+{-# INLINEABLE getAmountForSwp #-}
+--get 1% of fee on each swap
+getAmountForSwp:: Amount -> Amount -> Amount -> Amount
+getAmountForSwp inputAmount inputReserve outputReserve =
+  let inputAmountWithFee = inputAmount P.* 99
+      numerator = inputAmountWithFee * outputReserve
+      denominator = (inputReserve P.* 100) P.+ inputAmountWithFee
+    in P.divide numerator denominator
+
+
+--check the input to get
 ammUntypedValidator :: BuiltinData -> BuiltinData -> BuiltinData -> P.BuiltinUnit
 ammUntypedValidator _ redeemer ctx =
   -- check retourne ()
